@@ -1,1 +1,0 @@
-# Mini-SoC-Layered-SystemVerilog-Verification-
