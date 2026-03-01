@@ -1,6 +1,6 @@
 // ============================================================
 // design.sv
-// Mini SoC DUT (Arbiter + FIFO + Timer + GPIO)
+// Mini SoC DUT (Timer + GPIO + FIFO)
 // ============================================================
 
 `timescale 1ns/1ns
@@ -19,7 +19,6 @@ interface soc_if(input logic clk);
     logic [31:0] wdata;
     logic [31:0] rdata;
 
-    // Clocking block for race-free driving
     clocking cb @(posedge clk);
         output wr_en, rd_en, addr, wdata;
         input  rdata;
@@ -29,31 +28,7 @@ endinterface
 
 
 // ============================================================
-// FIXED PRIORITY ARBITER (CPU > DMA)
-// ============================================================
-
-module bus_arbiter(
-    input  logic req_cpu,
-    input  logic req_dma,
-    output logic grant_cpu,
-    output logic grant_dma
-);
-
-    always_comb begin
-        grant_cpu = 0;
-        grant_dma = 0;
-
-        if(req_cpu)
-            grant_cpu = 1;
-        else if(req_dma)
-            grant_dma = 1;
-    end
-
-endmodule
-
-
-// ============================================================
-// SIMPLE SYNCHRONOUS FIFO
+// FIFO (Correct & Stable)
 // ============================================================
 
 module fifo #(
@@ -71,38 +46,38 @@ module fifo #(
 );
 
     logic [WIDTH-1:0] mem [0:DEPTH-1];
-    logic [$clog2(DEPTH):0] wr_ptr, rd_ptr;
+
+    logic [$clog2(DEPTH)-1:0] wr_ptr, rd_ptr;
     logic [$clog2(DEPTH+1):0] count;
 
     always_ff @(posedge clk or negedge rst_n) begin
-        if(!rst_n)
-            wr_ptr <= 0;
-        else if(wr_en && !full) begin
-            mem[wr_ptr] <= wdata;
-            wr_ptr <= wr_ptr + 1;
-        end
-    end
-
-    always_ff @(posedge clk or negedge rst_n) begin
         if(!rst_n) begin
+            wr_ptr <= 0;
             rd_ptr <= 0;
+            count  <= 0;
             rdata  <= 0;
         end
-        else if(rd_en && !empty) begin
-            rdata <= mem[rd_ptr];
-            rd_ptr <= rd_ptr + 1;
-        end
-    end
-
-    always_ff @(posedge clk or negedge rst_n) begin
-        if(!rst_n)
-            count <= 0;
         else begin
+
+            // Write
+            if(wr_en && !full) begin
+                mem[wr_ptr] <= wdata;
+                wr_ptr <= (wr_ptr + 1) % DEPTH;
+            end
+
+            // Read
+            if(rd_en && !empty) begin
+                rdata <= mem[rd_ptr];
+                rd_ptr <= (rd_ptr + 1) % DEPTH;
+            end
+
+            // Count update
             case({wr_en && !full, rd_en && !empty})
                 2'b10: count <= count + 1;
                 2'b01: count <= count - 1;
                 default: count <= count;
             endcase
+
         end
     end
 
@@ -112,29 +87,20 @@ module fifo #(
 endmodule
 
 
+
 // ============================================================
-// MINI SOC TOP
+// MINI SoC
 // ============================================================
 
 module mini_soc(
     input  logic clk,
     input  logic rst_n,
 
-    // CPU master
     input  logic        cpu_wr_en,
     input  logic        cpu_rd_en,
     input  logic [7:0]  cpu_addr,
     input  logic [31:0] cpu_wdata,
-    output logic [31:0] cpu_rdata,
-
-    // DMA master (unused in TB, but present architecturally)
-    input  logic        dma_wr_en,
-    input  logic        dma_rd_en,
-    input  logic [7:0]  dma_addr,
-    input  logic [31:0] dma_wdata,
-    output logic [31:0] dma_rdata,
-
-    output logic irq
+    output logic [31:0] cpu_rdata
 );
 
     logic wr_en, rd_en;
@@ -142,40 +108,11 @@ module mini_soc(
     logic [31:0] wdata;
     logic [31:0] rdata;
 
-    logic grant_cpu, grant_dma;
-
-    // Arbiter instance
-    bus_arbiter arb(
-        .req_cpu(cpu_wr_en | cpu_rd_en),
-        .req_dma(dma_wr_en | dma_rd_en),
-        .grant_cpu(grant_cpu),
-        .grant_dma(grant_dma)
-    );
-
-    // Bus selection
-    always_comb begin
-        wr_en = 0;
-        rd_en = 0;
-        addr  = 0;
-        wdata = 0;
-        cpu_rdata = 0;
-        dma_rdata = 0;
-
-        if(grant_cpu) begin
-            wr_en = cpu_wr_en;
-            rd_en = cpu_rd_en;
-            addr  = cpu_addr;
-            wdata = cpu_wdata;
-            cpu_rdata = rdata;
-        end
-        else if(grant_dma) begin
-            wr_en = dma_wr_en;
-            rd_en = dma_rd_en;
-            addr  = dma_addr;
-            wdata = dma_wdata;
-            dma_rdata = rdata;
-        end
-    end
+    assign wr_en = cpu_wr_en;
+    assign rd_en = cpu_rd_en;
+    assign addr  = cpu_addr;
+    assign wdata = cpu_wdata;
+    assign cpu_rdata = rdata;
 
     // Registers
     logic [31:0] control_reg;
@@ -205,7 +142,7 @@ module mini_soc(
         .empty(fifo_empty)
     );
 
-    // Register write
+    // Write registers
     always_ff @(posedge clk or negedge rst_n) begin
         if(!rst_n) begin
             control_reg <= 0;
@@ -219,7 +156,7 @@ module mini_soc(
         end
     end
 
-    // Read logic
+    // Read mux
     always_comb begin
         rdata = 0;
 
@@ -233,7 +170,5 @@ module mini_soc(
             endcase
         end
     end
-
-    assign irq = fifo_full;
 
 endmodule
