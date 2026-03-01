@@ -1,4 +1,4 @@
-[2026-03-01 07:19:20 UTC] vlib work && vlog '-timescale' '1ns/1ns' design.sv testbench.sv  && vsim -c -do "vsim +access+r; run -all; exit"  
+[2026-03-01 07:25:53 UTC] vlib work && vlog '-timescale' '1ns/1ns' design.sv testbench.sv  && vsim -c -do "vsim +access+r; run -all; exit"  
 VSIMSA: Configuration file changed: `/home/runner/library.cfg'
 ALIB: Library "work" attached.
 work = ./work/work.lib
@@ -634,3 +634,11 @@ done
 # KERNEL: [MON ] T=4035 ADDR=14 RDATA=deadbeef
 # KERNEL: [MON ] T=4055 ADDR=29 RDATA=deadbeef
 # KERNEL: ========= TEST PASSED =========
+# KERNEL: Functional Coverage = 71.35%
+# RUNTIME: Info: RUNTIME_0068 testbench.sv (394): $finish called.
+# KERNEL: Time: 6565 ns,  Iteration: 0,  Instance: /tb,  Process: @INITIAL#349_5@.
+# KERNEL: stopped at time: 6565 ns
+# VSIM: Simulation has finished. There are no more test vectors to simulate.
+# ACDB: Covergroup Coverage data has been saved to "fcover.acdb" database.
+# VSIM: Simulation has finished.
+Done
