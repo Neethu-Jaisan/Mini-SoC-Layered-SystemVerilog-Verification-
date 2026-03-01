@@ -1,10 +1,3 @@
-// ============================================================
-// testbench.sv
-// Final Stable Transaction-Based Layered Testbench
-// ============================================================
-
-`timescale 1ns/1ns
-
 module tb;
 
     bit clk = 0;
@@ -22,303 +15,232 @@ module tb;
         .cpu_rdata(vif.rdata)
     );
 
-    // ========================================================
+    // =====================================================
     // TRANSACTION
-    // ========================================================
+    // =====================================================
 
-    class soc_txn;
-        bit [7:0]  addr;
-        bit [31:0] wdata;
-        bit        wr_en;
-        bit        rd_en;
+    class txn;
+        rand bit wr;
+        rand bit rd;
+        rand bit [7:0] addr;
+        rand bit [31:0] data;
+
+        constraint c1 { !(wr && rd); wr || rd; }
+
+        constraint c2 {
+            if(wr) addr inside {8'h00,8'h04,8'h10};
+            if(rd) addr inside {8'h00,8'h04,8'h08,8'h14};
+        }
     endclass
 
 
-    // ========================================================
-    // GENERATOR (Deterministic)
-    // ========================================================
+    // =====================================================
+    // MAILBOXES / SYNC
+    // =====================================================
+
+    mailbox #(txn) gen2drv = new();
+    mailbox #(txn) mon2sb  = new();
+
+    semaphore bus_lock = new(1);
+    event drv_done;
+
+
+    // =====================================================
+    // GENERATOR
+    // =====================================================
 
     class generator;
+        mailbox #(txn) mbx;
 
-        mailbox #(soc_txn) gen2drv;
-
-        function new(mailbox #(soc_txn) m);
-            gen2drv = m;
+        function new(mailbox #(txn) m);
+            mbx = m;
         endfunction
 
-        task run();
-
-            soc_txn tx;
-
-            // Enable timer
-            tx = new();
-            tx.addr = 8'h00;
-            tx.wdata = 32'h1;
-            tx.wr_en = 1;
-            tx.rd_en = 0;
-            gen2drv.put(tx);
-
-            // Read timer 5 times
-            repeat(5) begin
-                tx = new();
-                tx.addr = 8'h08;
-                tx.wr_en = 0;
-                tx.rd_en = 1;
-                gen2drv.put(tx);
+        task run(int count);
+            txn t;
+            repeat(count) begin
+                t = new();
+                assert(t.randomize());
+                $display("[GEN ] T=%0t WR=%0b RD=%0b ADDR=%h DATA=%h",
+                         $time, t.wr, t.rd, t.addr, t.data);
+                mbx.put(t);
             end
-
-            // FIFO write
-            repeat(4) begin
-                tx = new();
-                tx.addr = 8'h10;
-                tx.wdata = $urandom;
-                tx.wr_en = 1;
-                tx.rd_en = 0;
-                gen2drv.put(tx);
-            end
-
-            // FIFO read
-            repeat(4) begin
-                tx = new();
-                tx.addr = 8'h14;
-                tx.wr_en = 0;
-                tx.rd_en = 1;
-                gen2drv.put(tx);
-            end
-
         endtask
-
     endclass
 
 
-    // ========================================================
+    // =====================================================
     // DRIVER
-    // ========================================================
+    // =====================================================
 
     class driver;
-
+        mailbox #(txn) mbx;
         virtual soc_if vif;
-        mailbox #(soc_txn) gen2drv;
-        mailbox #(soc_txn) drv2sb;
+        semaphore lock;
+        event done;
 
-        function new(virtual soc_if vif,
-                     mailbox #(soc_txn) g2d,
-                     mailbox #(soc_txn) d2s);
-            this.vif = vif;
-            gen2drv = g2d;
-            drv2sb = d2s;
+        function new(mailbox #(txn) m,
+                     virtual soc_if v,
+                     semaphore s,
+                     event e);
+            mbx = m;
+            vif = v;
+            lock = s;
+            done = e;
         endfunction
 
         task run();
-
-            soc_txn tx;
-
+            txn t;
             forever begin
+                mbx.get(t);
+                lock.get();
 
-                gen2drv.get(tx);
+                @(posedge vif.clk);
+                vif.addr  <= t.addr;
+                vif.wdata <= t.data;
+                vif.wr_en <= t.wr;
+                vif.rd_en <= t.rd;
 
-                vif.cb.addr  <= tx.addr;
-                vif.cb.wdata <= tx.wdata;
-                vif.cb.wr_en <= tx.wr_en;
-                vif.cb.rd_en <= tx.rd_en;
+                $display("[DRV ] T=%0t WR=%0b RD=%0b ADDR=%h WDATA=%h",
+                         $time, t.wr, t.rd, t.addr, t.data);
 
-                @(vif.cb);
-                @(vif.cb);
+                @(posedge vif.clk);
+                vif.wr_en <= 0;
+                vif.rd_en <= 0;
 
-                vif.cb.wr_en <= 0;
-                vif.cb.rd_en <= 0;
-
-                @(vif.cb);
-
-                if(tx.wr_en)
-                    drv2sb.put(tx);
-
+                -> done;
+                lock.put();
             end
         endtask
-
     endclass
 
 
-    // ========================================================
+    // =====================================================
     // MONITOR
-    // ========================================================
+    // =====================================================
 
     class monitor;
-
+        mailbox #(txn) mbx;
         virtual soc_if vif;
-        mailbox #(soc_txn) mon2sb;
+        event done;
 
-        function new(virtual soc_if vif,
-                     mailbox #(soc_txn) m2s);
-            this.vif = vif;
-            mon2sb = m2s;
+        function new(mailbox #(txn) m,
+                     virtual soc_if v,
+                     event e);
+            mbx = m;
+            vif = v;
+            done = e;
         endfunction
 
         task run();
-
-            soc_txn tx;
-            bit rd_prev = 0;
-
+            txn t;
             forever begin
+                @(done);
                 @(posedge vif.clk);
 
-                if(vif.rd_en && !rd_prev) begin
-                    @(posedge vif.clk);
+                t = new();
+                t.addr = vif.addr;
+                t.data = vif.rdata;
+                t.wr   = vif.wr_en;
+                t.rd   = vif.rd_en;
 
-                    tx = new();
-                    tx.addr  = vif.addr;
-                    tx.wdata = vif.rdata;
-                    mon2sb.put(tx);
-                end
+                $display("[MON ] T=%0t ADDR=%h RDATA=%h",
+                         $time, t.addr, t.data);
 
-                rd_prev = vif.rd_en;
+                mbx.put(t);
             end
         endtask
-
     endclass
 
 
-    // ========================================================
+    // =====================================================
     // SCOREBOARD
-    // ========================================================
+    // =====================================================
 
     class scoreboard;
+        mailbox #(txn) mbx;
 
-        mailbox #(soc_txn) mon2sb;
-        mailbox #(soc_txn) drv2sb;
-        virtual soc_if vif;
-
-        bit [31:0] model_control;
-        bit [3:0]  model_gpio;
-        bit [31:0] model_timer;
+        bit [31:0] control_ref;
+        bit [3:0]  gpio_ref;
+        bit [31:0] timer_ref;
         bit [31:0] fifo_q[$];
 
-        function new(mailbox #(soc_txn) m2s,
-                     mailbox #(soc_txn) d2s,
-                     virtual soc_if vif);
-            mon2sb = m2s;
-            drv2sb = d2s;
-            this.vif = vif;
+        function new(mailbox #(txn) m);
+            mbx = m;
         endfunction
 
         task run();
-
-            soc_txn tx;
-            bit [31:0] expected;
-
+            txn t;
             forever begin
-                @(posedge vif.clk);
+                mbx.get(t);
 
-                if(!vif.rst_n) begin
-                    model_control = 0;
-                    model_gpio    = 0;
-                    model_timer   = 0;
-                    fifo_q.delete();
-                end
-
-                // Write tracking
-                if(drv2sb.num() > 0) begin
-                    drv2sb.get(tx);
-                    case(tx.addr)
-                        8'h00: model_control = tx.wdata;
-                        8'h04: model_gpio    = tx.wdata[3:0];
-                        8'h10: fifo_q.push_back(tx.wdata);
+                if(t.wr) begin
+                    case(t.addr)
+                        8'h00: control_ref = t.data;
+                        8'h04: gpio_ref    = t.data[3:0];
+                        8'h10: fifo_q.push_back(t.data);
                     endcase
+                    $display("[SB  ] WRITE ADDR=%h DATA=%h",
+                             t.addr, t.data);
                 end
 
-                // Timer model
-                if(model_control[0])
-                    model_timer++;
-
-                // Read checking
-                if(mon2sb.num() > 0) begin
-                    mon2sb.get(tx);
-
-                    case(tx.addr)
-                        8'h00: expected = model_control;
-                        8'h04: expected = {28'b0, model_gpio};
-                        8'h08: expected = model_timer;
-                        8'h14: begin
-                            if(fifo_q.size() > 0)
-                                expected = fifo_q.pop_front();
-                            else
-                                expected = 0;
-                        end
-                        default: expected = 0;
+                if(t.rd) begin
+                    bit [31:0] exp;
+                    case(t.addr)
+                        8'h00: exp = control_ref;
+                        8'h04: exp = {28'd0,gpio_ref};
+                        8'h08: exp = timer_ref;
+                        8'h14: exp = (fifo_q.size()) ?
+                                      fifo_q.pop_front() : 0;
                     endcase
 
-                    $display("READ Addr=%h Expected=%h Got=%h",
-                              tx.addr, expected, tx.wdata);
+                    $display("[SB  ] READ  ADDR=%h EXP=%h GOT=%h",
+                             t.addr, exp, t.data);
 
-                    if(expected !== tx.wdata)
-                        $error("MISMATCH at Addr=%h Expected=%h Got=%h",
-                                tx.addr, expected, tx.wdata);
+                    if(exp !== t.data)
+                        $error("Mismatch Addr=%h Exp=%h Got=%h",
+                               t.addr, exp, t.data);
                 end
 
+                if(control_ref[0])
+                    timer_ref++;
             end
         endtask
-
     endclass
 
 
-    // ========================================================
-    // ENVIRONMENT
-    // ========================================================
-
-    class environment;
-
-        generator gen;
-        driver drv;
-        monitor mon;
-        scoreboard sb;
-
-        mailbox #(soc_txn) gen2drv;
-        mailbox #(soc_txn) mon2sb;
-        mailbox #(soc_txn) drv2sb;
-
-        function new(virtual soc_if vif);
-
-            gen2drv = new();
-            mon2sb  = new();
-            drv2sb  = new();
-
-            gen = new(gen2drv);
-            drv = new(vif, gen2drv, drv2sb);
-            mon = new(vif, mon2sb);
-            sb  = new(mon2sb, drv2sb, vif);
-
-        endfunction
-
-        task run();
-            fork
-                gen.run();
-                drv.run();
-                mon.run();
-                sb.run();
-            join_none
-        endtask
-
-    endclass
-
-
-    // ========================================================
+    // =====================================================
     // TEST
-    // ========================================================
+    // =====================================================
 
     initial begin
 
-        environment env;
+        generator  gen;
+        driver     drv;
+        monitor    mon;
+        scoreboard sb;
 
         vif.rst_n = 0;
+        vif.wr_en = 0;
+        vif.rd_en = 0;
+
         repeat(5) @(posedge clk);
         vif.rst_n = 1;
 
-        env = new(vif);
-        env.run();
+        gen = new(gen2drv);
+        drv = new(gen2drv, vif, bus_lock, drv_done);
+        mon = new(mon2sb,  vif, drv_done);
+        sb  = new(mon2sb);
 
-        #2000;
+        fork
+            gen.run(20);    // small number for readable debug
+            drv.run();
+            mon.run();
+            sb.run();
+        join_none
+
+        #5000;
         $finish;
-
     end
 
 endmodule
