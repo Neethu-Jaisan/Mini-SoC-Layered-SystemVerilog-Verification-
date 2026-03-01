@@ -1,10 +1,25 @@
 module tb;
 
+    // ===================================================
+    // CLOCK GENERATION
+    // ===================================================
+    // 10ns clock period (100 MHz)
+    // Toggles every 5ns
     bit clk = 0;
     always #5 clk = ~clk;
 
+
+    // ===================================================
+    // INTERFACE INSTANCE
+    // ===================================================
+    // Connects DUT and testbench using a clean abstraction
     soc_if vif(clk);
 
+
+    // ===================================================
+    // DUT INSTANTIATION
+    // ===================================================
+    // Interface signals mapped to DUT ports
     mini_soc dut(
         .clk(clk),
         .rst_n(vif.rst_n),
@@ -15,41 +30,71 @@ module tb;
         .cpu_rdata(vif.rdata)
     );
 
-    // =====================================================
-    // TRANSACTION
-    // =====================================================
+
+    // ===================================================
+    // GLOBAL CONTROL VARIABLES
+    // ===================================================
+
+    int VERBOSE = 1;      // Controls printing
+    int error_count = 0;  // Tracks scoreboard mismatches
+
+
+    // ===================================================
+    // TRANSACTION CLASS
+    // ===================================================
+    // Represents one bus operation
+    // Used for constrained-random stimulus
 
     class txn;
-        rand bit wr;
-        rand bit rd;
-        rand bit [7:0] addr;
-        rand bit [31:0] data;
 
-        constraint c1 { !(wr && rd); wr || rd; }
+        rand bit wr;                 // Write enable
+        rand bit rd;                 // Read enable
+        rand bit [7:0]  addr;        // Address
+        rand bit [31:0] data;        // Data payload
 
-        constraint c2 {
-            if(wr) addr inside {8'h00,8'h04,8'h10};
-            if(rd) addr inside {8'h00,8'h04,8'h08,8'h14};
+        // Ensure only one operation at a time
+        constraint op_c {
+            wr ^ rd;     // XOR ensures exactly one is high
         }
+
+        // Weighted address distribution
+        // Higher weights = more frequent access
+        constraint addr_c {
+            addr dist {
+                8'h00 := 3,      // Control
+                8'h04 := 3,      // GPIO
+                8'h08 := 2,      // Timer
+                8'h10 := 3,      // FIFO write
+                8'h14 := 3,      // FIFO read
+                [8'h20:8'h2F] := 1  // Illegal range (coverage)
+            };
+        }
+
     endclass
 
 
-    // =====================================================
-    // MAILBOXES / SYNC
-    // =====================================================
+    // ===================================================
+    // COMMUNICATION MECHANISMS
+    // ===================================================
 
-    mailbox #(txn) gen2drv = new();
-    mailbox #(txn) mon2sb  = new();
+    mailbox #(txn) gen2drv = new();   // Generator → Driver
+    mailbox #(txn) mon2sb  = new();   // Monitor → Scoreboard
 
     semaphore bus_lock = new(1);
+    // Ensures only one driver access at a time
+    // (Scalable if multiple agents exist)
+
     event drv_done;
+    // Used to synchronize monitor sampling
 
 
-    // =====================================================
+    // ===================================================
     // GENERATOR
-    // =====================================================
+    // ===================================================
+    // Creates randomized transactions
 
     class generator;
+
         mailbox #(txn) mbx;
 
         function new(mailbox #(txn) m);
@@ -57,23 +102,33 @@ module tb;
         endfunction
 
         task run(int count);
+
             txn t;
+
             repeat(count) begin
                 t = new();
+
+                // Randomization with constraints
                 assert(t.randomize());
-                $display("[GEN ] T=%0t WR=%0b RD=%0b ADDR=%h DATA=%h",
-                         $time, t.wr, t.rd, t.addr, t.data);
-                mbx.put(t);
+
+                if(VERBOSE)
+                    $display("[GEN ] T=%0t WR=%0b RD=%0b ADDR=%h DATA=%h",
+                              $time, t.wr, t.rd, t.addr, t.data);
+
+                mbx.put(t);  // Send to driver
             end
         endtask
+
     endclass
 
 
-    // =====================================================
+    // ===================================================
     // DRIVER
-    // =====================================================
+    // ===================================================
+    // Converts transactions into pin-level activity
 
     class driver;
+
         mailbox #(txn) mbx;
         virtual soc_if vif;
         semaphore lock;
@@ -89,37 +144,51 @@ module tb;
             done = e;
         endfunction
 
+
         task run();
+
             txn t;
+
             forever begin
-                mbx.get(t);
-                lock.get();
+
+                mbx.get(t);   // Get transaction
+                lock.get();   // Acquire bus access
 
                 @(posedge vif.clk);
+
+                // Drive signals
                 vif.addr  <= t.addr;
                 vif.wdata <= t.data;
                 vif.wr_en <= t.wr;
                 vif.rd_en <= t.rd;
 
-                $display("[DRV ] T=%0t WR=%0b RD=%0b ADDR=%h WDATA=%h",
-                         $time, t.wr, t.rd, t.addr, t.data);
+                if(VERBOSE)
+                    $display("[DRV ] T=%0t WR=%0b RD=%0b ADDR=%h WDATA=%h",
+                              $time, t.wr, t.rd, t.addr, t.data);
 
+                // Hold for 1 cycle
                 @(posedge vif.clk);
+
+                // Deassert control
                 vif.wr_en <= 0;
                 vif.rd_en <= 0;
 
-                -> done;
+                -> done;   // Notify monitor
                 lock.put();
             end
         endtask
+
     endclass
 
 
-    // =====================================================
+    // ===================================================
     // MONITOR
-    // =====================================================
+    // ===================================================
+    // Passive observer — never drives signals
+    // Samples DUT output after driver transaction
 
     class monitor;
+
         mailbox #(txn) mbx;
         virtual soc_if vif;
         event done;
@@ -133,85 +202,149 @@ module tb;
         endfunction
 
         task run();
+
             txn t;
+
             forever begin
-                @(done);
-                @(posedge vif.clk);
+
+                @(done);               // Wait for driver completion
+                @(posedge vif.clk);    // Sample next cycle
 
                 t = new();
+
                 t.addr = vif.addr;
                 t.data = vif.rdata;
                 t.wr   = vif.wr_en;
                 t.rd   = vif.rd_en;
 
-                $display("[MON ] T=%0t ADDR=%h RDATA=%h",
-                         $time, t.addr, t.data);
+                if(VERBOSE)
+                    $display("[MON ] T=%0t ADDR=%h RDATA=%h",
+                              $time, t.addr, t.data);
 
-                mbx.put(t);
+                mbx.put(t);  // Send to scoreboard
             end
         endtask
+
     endclass
 
 
-    // =====================================================
-    // SCOREBOARD
-    // =====================================================
+    // ===================================================
+    // SCOREBOARD (Cycle-Accurate Reference Model)
+    // ===================================================
+    // Mirrors DUT behavior in pure software model
 
     class scoreboard;
+
         mailbox #(txn) mbx;
 
+        // Reference model variables
         bit [31:0] control_ref;
         bit [3:0]  gpio_ref;
         bit [31:0] timer_ref;
-        bit [31:0] fifo_q[$];
+        bit [31:0] fifo_q[$];  // Dynamic queue models FIFO
 
         function new(mailbox #(txn) m);
             mbx = m;
         endfunction
 
+        task reset_model();
+            control_ref = 0;
+            gpio_ref = 0;
+            timer_ref = 0;
+            fifo_q.delete();
+        endtask
+
+
         task run();
+
             txn t;
+
             forever begin
+
                 mbx.get(t);
 
+                // Reset handling
+                if(!vif.rst_n) begin
+                    reset_model();
+                    continue;
+                end
+
+                // WRITE model update
                 if(t.wr) begin
                     case(t.addr)
                         8'h00: control_ref = t.data;
                         8'h04: gpio_ref    = t.data[3:0];
                         8'h10: fifo_q.push_back(t.data);
                     endcase
-                    $display("[SB  ] WRITE ADDR=%h DATA=%h",
-                             t.addr, t.data);
                 end
 
+                // READ checking
                 if(t.rd) begin
+
                     bit [31:0] exp;
+
                     case(t.addr)
                         8'h00: exp = control_ref;
                         8'h04: exp = {28'd0,gpio_ref};
                         8'h08: exp = timer_ref;
                         8'h14: exp = (fifo_q.size()) ?
                                       fifo_q.pop_front() : 0;
+                        default: exp = 32'hDEAD_BEEF;
                     endcase
 
-                    $display("[SB  ] READ  ADDR=%h EXP=%h GOT=%h",
-                             t.addr, exp, t.data);
+                    if(VERBOSE)
+                        $display("[SB  ] T=%0t ADDR=%h EXP=%h GOT=%h",
+                                  $time, t.addr, exp, t.data);
 
-                    if(exp !== t.data)
+                    if(exp !== t.data) begin
                         $error("Mismatch Addr=%h Exp=%h Got=%h",
                                t.addr, exp, t.data);
+                        error_count++;
+                    end
                 end
 
+                // Cycle-accurate timer update
+                @(posedge vif.clk);
                 if(control_ref[0])
                     timer_ref++;
+
             end
         endtask
+
     endclass
 
 
-    // =====================================================
-    // TEST
-    // =====================================================
+    // ===================================================
+    // FUNCTIONAL COVERAGE
+    // ===================================================
+
+    covergroup cg @(posedge clk);
+
+        coverpoint vif.addr;    // Address coverage
+        coverpoint vif.wr_en;   // Write coverage
+        coverpoint vif.rd_en;   // Read coverage
+
+    endgroup
+
+    cg coverage = new();
+
+
+    // ===================================================
+    // ASSERTION
+    // ===================================================
+    // Ensures protocol correctness
+
+    property no_simultaneous_wr_rd;
+        @(posedge clk)
+        !(vif.wr_en && vif.rd_en);
+    endproperty
+
+    assert property(no_simultaneous_wr_rd);
+
+
+    // ===================================================
+    // TEST CONTROL
+    // ===================================================
 
     initial begin
 
@@ -220,6 +353,7 @@ module tb;
         monitor    mon;
         scoreboard sb;
 
+        // Initial reset
         vif.rst_n = 0;
         vif.wr_en = 0;
         vif.rd_en = 0;
@@ -227,19 +361,36 @@ module tb;
         repeat(5) @(posedge clk);
         vif.rst_n = 1;
 
+        // Create components
         gen = new(gen2drv);
         drv = new(gen2drv, vif, bus_lock, drv_done);
         mon = new(mon2sb,  vif, drv_done);
         sb  = new(mon2sb);
 
+        // Start all components
         fork
-            gen.run(20);    // small number for readable debug
+            gen.run(200);
             drv.run();
             mon.run();
             sb.run();
         join_none
 
+        // Mid-test reset to verify robustness
+        #1500;
+        vif.rst_n = 0;
+        repeat(3) @(posedge clk);
+        vif.rst_n = 1;
+
         #5000;
+
+        if(error_count == 0)
+            $display("========= TEST PASSED =========");
+        else
+            $display("========= TEST FAILED =========");
+
+        $display("Functional Coverage = %0.2f%%",
+                 coverage.get_coverage());
+
         $finish;
     end
 
