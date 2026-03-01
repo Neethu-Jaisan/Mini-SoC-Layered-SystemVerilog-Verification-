@@ -1,144 +1,59 @@
-# Mini SoC Design and Layered SystemVerilog Verification
+# Mini SoC – Layered SystemVerilog Verification
 
 ## Overview
 
-This project implements a simplified memory-mapped Mini SoC in SystemVerilog along with a structured layered testbench.
+This project implements and verifies a memory-mapped Mini SoC using a layered SystemVerilog testbench architecture (non-UVM).
 
-The goal is to demonstrate:
+The SoC includes:
+- Control register
+- GPIO register
+- Timer block
+- FIFO block
 
-- Register-based SoC architecture
-- Inter-block communication
-- Constrained random verification
-- Layered testbench design (Generator → Driver → Monitor → Scoreboard)
-- Cycle-accurate reference model checking
-
-The focus is clarity, correctness, and methodology rather than protocol complexity.
+The verification environment uses a Generator–Driver–Monitor–Scoreboard architecture with constrained-random stimulus, cycle-accurate reference modeling, functional coverage, and assertions.
 
 ---
 
-# Design Architecture
+## Architecture
 
-## Memory Map
+Address Map:
 
-| Address | Register         | Description                         |
-|----------|-----------------|-------------------------------------|
-| 0x00     | Control Register| Bit[0] enables counter              |
-| 0x04     | GPIO Register   | 4-bit memory-mapped output          |
-| 0x08     | Counter Register| Increments when enabled             |
-| 0x0C     | Status Register | Aggregated GPIO + Control status    |
-
----
-
-## Internal Blocks
-
-### 1. Control Register
-- Written through memory-mapped interface
-- Bit[0] controls counter enable
-
-### 2. GPIO Peripheral
-- 4-bit output register
-- Writable and readable
-
-### 3. Counter Peripheral
-- Sequential logic
-- Increments every clock when enabled
-
-### 4. Status Register
-- Combinational aggregation of internal state
+| Address | Function |
+|---------|----------|
+| 0x00    | Control Register |
+| 0x04    | GPIO Register |
+| 0x08    | Timer Register |
+| 0x10    | FIFO Write |
+| 0x14    | FIFO Read |
 
 ---
 
-# Verification Architecture
+## Verification Features
 
-Layered SystemVerilog testbench:
-Generator → Driver → DUT → Monitor → Scoreboard
-
-## Components
-
-### Transaction
-- Constrained random generation
-- Valid read/write combinations only
-- Restricted to valid address map
-
-### Generator
-- Produces randomized transactions
-
-### Driver
-- Drives interface using clocking block
-- Uses semaphore for bus control
-
-### Monitor
-- Passively observes read transactions
-
-### Scoreboard
-- Maintains cycle-accurate reference model
-- Mirrors RTL behavior
-- Checks expected vs actual data
-- Correctly models nonblocking counter behavior
+- Constrained-random transaction generation
+- Weighted address distribution
+- Mailbox-based communication
+- Semaphore-based bus control
+- Event synchronization
+- Cycle-accurate scoreboard model
+- Mid-test reset validation
+- Functional coverage collection
+- Assertion-based protocol checking
 
 ---
 
-# Synchronization Mechanisms Used
-
-- Mailbox (Generator → Driver)
-- Mailbox (Monitor → Scoreboard)
-- Semaphore (bus access control)
-- Event (transaction completion signaling)
-- Virtual Interface
-- Clocking block
-
----
-
-# Simulation Output
-
-Simulation performed using Riviera-PRO (EDU Edition).
-
-Example output:
- KERNEL: Read Addr=4 Data=0
- KERNEL: Read Addr=8 Data=0
- KERNEL: Read Addr=0 Data=0
- KERNEL: Read Addr=4 Data=0
- KERNEL: Read Addr=8 Data=0
- KERNEL: Read Addr=8 Data=0
- KERNEL: Read Addr=4 Data=f
- KERNEL: Read Addr=0 Data=c1429199
- KERNEL: Read Addr=4 Data=f
- KERNEL: Read Addr=4 Data=f
- KERNEL: Read Addr=0 Data=c1429199
- KERNEL: Read Addr=8 Data=6
- KERNEL: Read Addr=c Data=f8
- KERNEL: Read Addr=4 Data=f
- KERNEL: Read Addr=c Data=f8
- RUNTIME: Info: RUNTIME_0068 testbench.sv (309): $finish called.
-
- 
-No mismatches were reported during simulation.
-
----
-
-# Key Technical Learnings
-
-- Memory-mapped register design
-- Address decoding
-- Sequential vs combinational logic partitioning
-- Constrained random stimulus generation
-- Thread-safe communication using mailboxes
-- Resource protection using semaphores
-- Cycle-accurate scoreboard modeling
-- Handling nonblocking assignment timing in reference models
-
----
-
-# Tools Used
+## Tools Used
 
 - SystemVerilog
-- Riviera-PRO Simulator
-- ModelSim-compatible simulation structure
+- Riviera-PRO / ModelSim compatible
+- Functional Coverage (covergroup)
+- Immediate & Concurrent Assertions
 
 ---
 
-# Project Structure
-design.sv → Interface + Mini SoC RTL
-testbench.sv → Layered Verification Environment
-README.md → Documentation
+## How to Run
 
+```bash
+vlib work
+vlog -timescale 1ns/1ns rtl/*.sv tb/*.sv
+vsim tb -c -do "run -all; exit"
